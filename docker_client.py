@@ -1,7 +1,282 @@
 import logging
 from datetime import datetime
 
+import hashlib
+
 import docker
+
+
+class ConsistentNode:
+    """
+    Represents a node in consistent hashing.
+
+    Attributes:
+        node (str): The identifier for the node.
+        is_down (bool): Indicates whether the node is currently running or not.
+
+    Methods:
+        __init__(self, _node): Initializes a ConsistentNode instance.
+        __str__(self): Returns a string representation of the ConsistentNode.
+    """
+
+    def __init__(self, _node):
+        self.node = _node
+        self.is_down = False
+
+    def __str__(self):
+        return f'{self.node} {self.is_down}'
+
+
+class ConsistentHashing:
+    """
+        Implements consistent hashing with virtual nodes.
+
+        Attributes:
+            __ring (ConsistentHashing.Ring): The ring structure to store nodes.
+
+        Methods:
+            __init__(self, capacity): Initializes a ConsistentHashing instance with a specified capacity.
+            put(self, node): Adds a node to the consistent hashing ring.
+            get_request_server(self, request): Returns the node responsible for handling a given request.
+            get_ring(self): Returns the underlying ring structure.
+            soft_delete(self, node): Marks a node as down in a soft delete fashion.
+    """
+
+    class Hash:
+        """
+                Provides hashing functionality for consistent hashing.
+
+                Methods:
+                    find_index(_val, final_capacity): Calculates the hash index for a given value.
+        """
+
+        @staticmethod
+        def find_index(_val, final_capacity: int):
+            if _val is None:
+                raise ValueError("None types are forbidden")
+            return int(hashlib.md5(str(_val).encode()).hexdigest(), 16) % final_capacity
+
+    class Ring:
+        """
+                Represents the ring structure in consistent hashing.
+
+                Attributes:
+                    __ring (list): The array representing the ring.
+                    capacity (int): The current capacity of the ring.
+
+                Methods:
+                    __init__(self, capacity): Initializes a Ring instance with a specified capacity.
+                    __str__(self): Returns a string representation of the Ring.
+                    get_ring(self): Returns the underlying array representing the ring.
+                    put_server(self, _node): Adds a server node to the ring.
+                    should_expand(self): Checks if the ring needs expansion.
+                    expand_ring(self): Expands the ring if needed.
+                    get_server(self, request): Returns the server node responsible for handling a given request.
+                    update(self, _node, n_node): Updates a node in the ring.
+                    delete(self, _node): Deletes a node from the ring.
+                    soft_delete(self, _node): Marks a node as down in a soft delete fashion.
+        """
+
+        def __init__(self, capacity: int = 1_000):
+            self.__ring = [None] * capacity
+            self.capacity = capacity
+
+        def __str__(self):
+            return f'{self.__ring}'
+
+        def get_ring(self):
+            """
+            Give the current ring instance
+
+            :return Current ring instance:
+            """
+            return self.__ring
+
+        def put_server(self, _node):
+            """
+            Put the data in the following way
+            find index if node at index is None
+            then it will put the data else will find
+            the empty spot to fill it.
+
+            :param _node:
+            :return None:
+            """
+            if _node is not None:
+                c_index = ConsistentHashing.Hash.find_index(_node, len(self.__ring))
+                if self.__ring[c_index] is None:
+                    self.__ring[c_index] = _node
+                else:
+                    c_idx = c_index
+                    for i in range(c_index, len(self.__ring)):
+                        if self.__ring[i] is None:
+                            self.__ring[i] = _node
+                            # c_idx += 1
+                            break
+                        c_idx += 1
+
+                    if c_idx == len(self.__ring):
+                        for i in range(0, c_index):
+                            if c_index == i + 1 and self.__ring[i] is not None:
+                                self.__ring.append(_node)
+                                self.expand_ring()
+
+        def should_expand(self):
+            """
+            Check whether the ring should expand or not
+
+            :return bool:
+            """
+            for val in self.__ring:
+                if val is None:
+                    return False
+            return True
+
+        def expand_ring(self):
+            """
+            Implements the expansion of ring and
+            rearrangement of the nodes based on
+            the new capacity.
+
+            :return None:
+            """
+            if self.should_expand():
+                n_capacity = self.capacity * 2 + 1
+                n_ring = [None] * n_capacity
+                for val in self.__ring:
+                    idx = ConsistentHashing.Hash.find_index(val, n_capacity)
+                    if n_ring[idx] is None:
+                        n_ring[idx] = val
+                    else:
+                        v = 0
+                        for i in range(idx, n_capacity):
+                            if n_ring[i] is None:
+                                n_ring[i] = val
+                                v += 1
+
+                        if v is n_capacity - 1 and n_ring[v] is not val:
+                            for i in range(0, idx):
+                                if n_ring[idx] is None:
+                                    n_ring[idx] = val
+
+                self.__ring = n_ring
+                self.capacity = n_capacity
+
+        def get_server(self, request):
+            """
+            Return the server instance mapped
+            according to the consistent hashing algorithm
+
+            :param request:
+            :return ConsistentNode:
+            """
+            idx = ConsistentHashing.Hash.find_index(request, self.capacity)
+            if self.__ring[idx] is not None:
+                return self.__ring[idx]
+            else:
+                for i in range(idx, self.capacity):
+                    if self.__ring[idx] is not None:
+                        return self.__ring[idx]
+
+                for i in range(0, idx):
+                    if self.__ring[idx] is not None:
+                        return self.__ring[idx]
+
+                return None
+
+        def update(self, _node, n_node):
+            """
+            Updates the instance of the
+            server based on the consistent
+            hashing algorithm.
+
+            :param n_node:
+            :param _node:
+            :return bool:
+            """
+            expected_idx = ConsistentHashing.Hash.find_index(_node, self.capacity)
+            if (self.__ring[expected_idx] is None or
+                    self.__ring[expected_idx] is not _node
+                    or n_node is not None):
+
+                for i in range(expected_idx, self.capacity):
+                    if self.__ring[i] is _node:
+                        self.__ring[i] = n_node
+                        return True
+
+                for i in range(0, expected_idx):
+                    if self.__ring[i] is _node:
+                        self.__ring[i] = n_node
+                        return True
+
+            return False
+
+        def delete(self, _node):
+            """
+            Deletes by updating the
+            _node with None in consistent ring
+
+            :param _node:
+            :return bool:
+            """
+            return self.update(_node, None)
+
+        def soft_delete(self, _node: ConsistentNode):
+            """
+            Soft deletes the node by
+            updating the is_down attribute
+
+            :param _node:
+            :return bool:
+            """
+
+            n_node = ConsistentNode(_node.node)
+            n_node.is_down = True
+            return self.update(_node, n_node)
+
+    def __init__(self, capacity):
+        self.__ring = ConsistentHashing.Ring(capacity)
+
+    def put(self, node: ConsistentNode):
+        """
+        api for easy calling and
+        interacting with the Ring
+
+        :param node:
+        :return None:
+        """
+        if node is not None:
+            self.__ring.put_server(node)
+
+    def get_request_server(self, request):
+        """
+        Returns the server instance
+        by consistent hashing algorithm
+
+        :param request:
+        :return ConsistentNode:
+        """
+        if request is not None:
+            return self.__ring.get_server(request)
+
+    def get_ring(self):
+        """
+        To return the Ring instance
+        currently used
+
+        :return Ring:
+        """
+        return self.__ring
+
+    def soft_delete(self, node):
+        """
+        Soft deletes the instance from the ring
+
+        :param node:
+        :return bool:
+        """
+        if node is not None:
+            return self.__ring.soft_delete(node)
 
 
 class FileLogger:
@@ -211,3 +486,32 @@ class ImageManager:
         except docker.errors.APIError as api_error:
             self.logger.log(f"Error building image '{tag}': {api_error}")
             return None
+
+
+
+def create_docker_instances():
+    # Create a Container instance
+    container_manager = Container(init_capacity=5)
+
+    # Create 5 containers
+    # for i in range(5):
+    container_ports = {"5000/tcp": 9999}
+    container = container_manager.create_container(
+        image="my_custom_image",
+        command="python3 app/app.py",
+        # network_name="my_network",
+        ports=container_ports
+    )
+
+    print(container)
+    # List all containers
+    print("All Containers:")
+    # for c in container_manager.get_all():
+    #     print(f"- {c.name}")
+
+    # Start all containers
+    container_manager.start_containers()
+
+
+if __name__ == "__main__":
+    create_docker_instances()
